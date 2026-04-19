@@ -7,6 +7,7 @@ import {
 import { cryptoRng } from '@/rules';
 import { createDeepSeek, streamCallKp } from '@/ai';
 import { requireSessionOwner } from '@/lib/auth';
+import { resolveDeepSeekApiKey } from '@/lib/deepseek-resolver';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -26,8 +27,10 @@ export async function POST(
 ): Promise<Response> {
   const { id: sessionId } = await params;
 
+  let userId: string;
   try {
-    await requireSessionOwner(sessionId);
+    const user = await requireSessionOwner(sessionId);
+    userId = user.id;
   } catch (err) {
     return Response.json({ error: (err as Error).message }, { status: 403 });
   }
@@ -40,8 +43,15 @@ export async function POST(
     return Response.json({ error: 'invalid JSON body' }, { status: 400 });
   }
 
+  let apiKey: string;
+  try {
+    apiKey = await resolveDeepSeekApiKey(userId);
+  } catch (err) {
+    return Response.json({ error: (err as Error).message }, { status: 400 });
+  }
+
   const encoder = new TextEncoder();
-  const ds = createDeepSeek();
+  const ds = createDeepSeek({ apiKey });
   const repo = new LocalSessionRepo();
 
   const stream = new ReadableStream<Uint8Array>({

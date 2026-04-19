@@ -39,6 +39,9 @@ export default async function RootLayout({
                   <Link href="/sessions/new" className="hover:text-rust-500">
                     开局
                   </Link>
+                  <Link href="/settings" className="hover:text-rust-500">
+                    设置
+                  </Link>
                   <span className="text-ink-400">{user.email}</span>
                   <form action="/sign-out" method="post">
                     <button

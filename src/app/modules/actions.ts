@@ -10,6 +10,7 @@ import { createDeepSeek } from '@/ai/deepseek';
 import type { ModuleRow } from '@/db/types';
 import { requireUser } from '@/lib/auth';
 import { LocalDB, type ModuleChunkRow } from '@/lib/localdb/db';
+import { resolveDeepSeekApiKey } from '@/lib/deepseek-resolver';
 
 async function insertModuleAndChunks(moduleRow: ModuleRow): Promise<string> {
   const chunks: ModuleChunkRow[] = chunkModule(moduleRow.content).map(c => ({
@@ -42,7 +43,8 @@ export async function generateModuleAction(formData: FormData): Promise<void> {
 
   let moduleId: string;
   try {
-    const ds = createDeepSeek();
+    const apiKey = await resolveDeepSeekApiKey(user.id);
+    const ds = createDeepSeek({ apiKey });
     const { module: moduleRow } = await generateModule(
       {
         theme,
@@ -76,7 +78,8 @@ export async function importModuleAction(formData: FormData): Promise<void> {
 
   let moduleId: string;
   try {
-    const ds = createDeepSeek();
+    const apiKey = await resolveDeepSeekApiKey(user.id);
+    const ds = createDeepSeek({ apiKey });
     const { module: moduleRow } = await importModule(
       {
         raw_text,
