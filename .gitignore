@@ -1,0 +1,30 @@
+node_modules/
+dist/
+.next/
+.vercel/
+coverage/
+
+# Local JSON database (accounts + game data)
+data/
+
+# env files -- NEVER commit
+.env
+.env.*
+!.env.example
+
+# editor / OS
+.DS_Store
+*.log
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# dev-server runtime log
+dev.log
+
+# Next.js / TS auto-generated
+next-env.d.ts
+*.tsbuildinfo
+
+# Jupyter artifacts (crept in from some tool)
+.ipynb_checkpoints/
