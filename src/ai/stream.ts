@@ -2,6 +2,7 @@ import type OpenAI from 'openai';
 import { KpOutput } from '../schemas/kp-output.js';
 import type { KpOutput as KpOutputT } from '../schemas/kp-output.js';
 import { KP_SYSTEM_PROMPT } from './prompt.js';
+import { withApiRetry } from '../lib/retry.js';
 
 // ---------------------------------------------------------------------------
 // Streaming KP call: opens a DeepSeek chat completion stream (OpenAI-compatible)
@@ -68,44 +69,67 @@ export async function streamCallKp(
   const userContent = typeof context === 'string' ? context : JSON.stringify(context);
 
   // ---- First pass: streaming ------------------------------------------------
-  const stream = await deps.client.chat.completions.create(
-    {
-      model: deps.model,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: userContent },
-      ],
-      response_format: { type: 'json_object' },
-      stream: true,
-      temperature: opts.temperature ?? 0.8,
+  // The entire "open stream + accumulate + progressively emit narration" block
+  // is wrapped in withApiRetry so that a transient 429/5xx/connection-drop at
+  // any point (including mid-stream) silently restarts.  On each retry we
+  // clear the partially-emitted narration on the client so fragments from the
+  // aborted attempt don't prefix the fresh output.
+  const firstPass = await withApiRetry(
+    async () => {
+      const stream = await deps.client.chat.completions.create(
+        {
+          model: deps.model,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: userContent },
+          ],
+          response_format: { type: 'json_object' },
+          stream: true,
+          temperature: opts.temperature ?? 0.8,
+        },
+        opts.signal ? { signal: opts.signal } : {},
+      );
+
+      let accumulated = '';
+      let lastNarrationLen = 0;
+
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content;
+        if (!delta) continue;
+        accumulated += delta;
+
+        const m = accumulated.match(NARRATION_RE);
+        if (!m) continue;
+        const matched = m[1] ?? '';
+        if (matched.length <= lastNarrationLen) continue;
+
+        let text: string | null = null;
+        try {
+          text = JSON.parse(`"${matched}"`) as string;
+        } catch {
+          text = null;
+        }
+        if (text !== null) {
+          lastNarrationLen = matched.length;
+          callbacks.onNarrationChange?.(text);
+        }
+      }
+
+      return { accumulated };
     },
-    opts.signal ? { signal: opts.signal } : {},
+    {
+      retries: 3,
+      delays: [500, 1500, 4000],
+      onRetry: () => {
+        // Wipe whatever partial narration the aborted attempt leaked, so the
+        // next attempt's stream starts from a clean slate on the client.
+        callbacks.onNarrationChange?.('');
+      },
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    },
   );
 
-  let accumulated = '';
-  let lastNarrationLen = 0;
-
-  for await (const chunk of stream) {
-    const delta = chunk.choices[0]?.delta?.content;
-    if (!delta) continue;
-    accumulated += delta;
-
-    const m = accumulated.match(NARRATION_RE);
-    if (!m) continue;
-    const matched = m[1] ?? '';
-    if (matched.length <= lastNarrationLen) continue;
-
-    let text: string | null = null;
-    try {
-      text = JSON.parse(`"${matched}"`) as string;
-    } catch {
-      text = null;
-    }
-    if (text !== null) {
-      lastNarrationLen = matched.length;
-      callbacks.onNarrationChange?.(text);
-    }
-  }
+  const accumulated = firstPass.accumulated;
 
   // ---- First-pass validate (with lenient state_ops scrub) -------------------
   const firstParsed = tryParseJson(accumulated);
@@ -117,25 +141,35 @@ export async function streamCallKp(
     // ---- Repair retry (non-streaming) -------------------------------------
     let lastErr: unknown = r1.error;
     for (let attempt = 0; attempt < maxRepairs; attempt++) {
-      const retry = await deps.client.chat.completions.create(
+      // Wrap the repair HTTP call itself in the same transient-error retry
+      // logic: schema-repair is orthogonal to transport reliability, and a
+      // 429/5xx on the repair attempt shouldn't blow up the whole turn.
+      const retry = await withApiRetry(
+        () => deps.client.chat.completions.create(
+          {
+            model: deps.model,
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: userContent },
+              { role: 'assistant', content: accumulated },
+              {
+                role: 'user',
+                content:
+                  `上一次输出不符合 schema。错误：${errorText(lastErr)}。\n` +
+                  `合法的 state_ops.op 仅有：${[...KNOWN_OPS].join(', ')}。\n` +
+                  `请严格按 schema 重新输出一个合法的 JSON 对象，仅使用合法的 op 枚举值，不要添加解释或 Markdown。`,
+              },
+            ],
+            response_format: { type: 'json_object' },
+            temperature: (opts.temperature ?? 0.8) * 0.5,  // lower temp for repair
+          },
+          opts.signal ? { signal: opts.signal } : {},
+        ),
         {
-          model: deps.model,
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: userContent },
-            { role: 'assistant', content: accumulated },
-            {
-              role: 'user',
-              content:
-                `上一次输出不符合 schema。错误：${errorText(lastErr)}。\n` +
-                `合法的 state_ops.op 仅有：${[...KNOWN_OPS].join(', ')}。\n` +
-                `请严格按 schema 重新输出一个合法的 JSON 对象，仅使用合法的 op 枚举值，不要添加解释或 Markdown。`,
-            },
-          ],
-          response_format: { type: 'json_object' },
-          temperature: (opts.temperature ?? 0.8) * 0.5,  // lower temp for repair
+          retries: 3,
+          delays: [500, 1500, 4000],
+          ...(opts.signal ? { signal: opts.signal } : {}),
         },
-        opts.signal ? { signal: opts.signal } : {},
       );
       const content = retry.choices[0]?.message?.content;
       if (!content) {
