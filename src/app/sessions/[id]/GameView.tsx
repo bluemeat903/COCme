@@ -176,12 +176,16 @@ export function GameView({
         : view.narration;
 
   // What roll should the dice card display?
-  //   - if a fresh live roll came in this turn, show that
-  //   - otherwise if the latest committed view has a resolved_check, show that
-  //   - else hide the card
+  //   - a live roll from THIS turn's check_resolved event: show that (streams animation)
+  //   - while streaming and no live roll yet: hide the card (prevents the
+  //     previous turn's resolved_check from leaking into a no-check turn and
+  //     re-playing its dice animation because the computed triggerKey differs
+  //     from the live-counter one)
+  //   - not streaming + committed view has a resolved_check: show static display
+  //   - else hide
   const diceInfo: LiveRoll | null = liveRoll
     ? liveRoll
-    : view.resolved_check
+    : !streaming && view.resolved_check
       ? {
           summary: view.resolved_check.summary,
           outcome: view.resolved_check.outcome as DiceOutcome,

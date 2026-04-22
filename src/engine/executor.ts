@@ -217,6 +217,43 @@ function isSuccess(o: Outcome): boolean {
   return o === 'regular_success' || o === 'hard_success' || o === 'extreme_success' || o === 'critical';
 }
 
+/**
+ * Normalized alias table for BRP characteristics.  Accepts English keys
+ * (both 3-letter abbreviations and full words) plus their canonical Chinese
+ * names.  The KP may also output typographically messy variants
+ * ("Strength", "STR", "力 量" with internal space) — we lowercase + strip
+ * whitespace before lookup.
+ */
+type StatKey = 'str' | 'con' | 'siz' | 'dex' | 'app' | 'int' | 'pow' | 'edu';
+
+const STAT_ALIASES: Record<string, StatKey> = {
+  // English short
+  str: 'str', con: 'con', siz: 'siz', dex: 'dex',
+  app: 'app', int: 'int', pow: 'pow', edu: 'edu',
+  // English full
+  strength: 'str',
+  constitution: 'con',
+  size: 'siz',
+  dexterity: 'dex',
+  appearance: 'app',
+  intelligence: 'int',
+  power: 'pow',
+  education: 'edu',
+  // Chinese canonical
+  '力量': 'str',
+  '体质': 'con',
+  '体型': 'siz',
+  '敏捷': 'dex',
+  '外貌': 'app',
+  '智力': 'int',
+  '意志': 'pow',
+  '教育': 'edu',
+};
+
+function normalizeStatOrSkillName(raw: string): string {
+  return raw.trim().replace(/\s+/g, '').toLowerCase();
+}
+
 function resolveTarget(state: SessionState, req: CheckRequest): number {
   const name = req.skill_or_stat;
   if (!name) throw new Error(`check of kind "${req.kind}" requires skill_or_stat`);
@@ -224,13 +261,20 @@ function resolveTarget(state: SessionState, req: CheckRequest): number {
   const cur = state.investigator.current;
   const base = state.investigator.base;
 
-  if (req.kind === 'luck' || name.toLowerCase() === 'luck' || name === '幸运') return cur.luck;
+  const normalized = normalizeStatOrSkillName(name);
 
-  const sk = cur.skills[name];
-  if (sk) return sk.value;
+  // Luck: explicit kind, or any common alias.
+  if (req.kind === 'luck' || normalized === 'luck' || name === '幸运') return cur.luck;
 
-  const lc = name.toLowerCase();
-  const statKey = (['str', 'con', 'siz', 'dex', 'app', 'int', 'pow', 'edu'] as const).find(k => k === lc);
+  // Skills are stored under their Chinese display name (e.g. '侦查').
+  // Try exact, then trimmed (tolerate trailing whitespace from KP output).
+  const skExact = cur.skills[name];
+  if (skExact) return skExact.value;
+  const skTrimmed = cur.skills[name.trim()];
+  if (skTrimmed) return skTrimmed.value;
+
+  // Characteristics: look up via the alias table.
+  const statKey = STAT_ALIASES[normalized];
   if (statKey) return base.stats[statKey];
 
   throw new Error(`unknown skill or stat "${name}" for this investigator`);
