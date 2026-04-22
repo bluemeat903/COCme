@@ -57,6 +57,81 @@ export function GameView({
     );
   }
 
+  async function runOneTurn(playerInput: string | null): Promise<void> {
+    const res = await fetch(`/api/sessions/${sessionId}/turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ player_input: playerInput }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body?.error ?? `HTTP ${res.status}`);
+    }
+    if (!res.body) throw new Error('no response body');
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finished = false;
+
+    while (!finished) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let idx: number;
+      while ((idx = buffer.indexOf('\n\n')) >= 0) {
+        const raw = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+
+        let event = 'message';
+        let data = '';
+        for (const line of raw.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) data += line.slice(5).trimStart();
+        }
+        if (!data) continue;
+        let payload: unknown;
+        try {
+          payload = JSON.parse(data);
+        } catch {
+          continue;
+        }
+
+        if (event === 'check_resolved') {
+          // Fires BEFORE the KP starts writing — kick off the dice animation.
+          const p = payload as {
+            summary: string;
+            outcome: string;
+            kind: string;
+            roll: number;
+            target: number | null;
+          };
+          rollCounterRef.current += 1;
+          setLiveRoll({
+            summary: p.summary,
+            outcome: p.outcome as DiceOutcome,
+            kind: (p.kind === 'san' ? 'san' : 'skill_like') as LiveRoll['kind'],
+            roll: p.roll,
+            target: p.target,
+            rollNo: rollCounterRef.current,
+          });
+        } else if (event === 'narration') {
+          const p = payload as { text?: string };
+          if (typeof p.text === 'string') setStreamText(p.text);
+        } else if (event === 'complete') {
+          commit(payload as PlayerView);
+          setStreamText('');
+          setInput('');
+          finished = true;
+        } else if (event === 'error') {
+          const p = payload as { message?: string };
+          throw new Error(p.message ?? 'turn failed');
+        }
+      }
+    }
+  }
+
   async function advance(playerInput: string | null) {
     if (streaming) return;
     setError(null);
@@ -65,81 +140,32 @@ export function GameView({
     // check_resolved event (or stays hidden if this turn has no check).
     setLiveRoll(null);
     setStreaming(true);
+
+    const MAX_TRIES = 3;
+    const BACKOFFS = [500, 1500, 4000];
+
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/turn`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ player_input: playerInput }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error ?? `HTTP ${res.status}`);
-      }
-      if (!res.body) throw new Error('no response body');
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let finished = false;
-
-      while (!finished) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        let idx: number;
-        while ((idx = buffer.indexOf('\n\n')) >= 0) {
-          const raw = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 2);
-
-          let event = 'message';
-          let data = '';
-          for (const line of raw.split('\n')) {
-            if (line.startsWith('event:')) event = line.slice(6).trim();
-            else if (line.startsWith('data:')) data += line.slice(5).trimStart();
+      for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
+        try {
+          await runOneTurn(playerInput);
+          return;
+        } catch (e) {
+          if (attempt === MAX_TRIES - 1) {
+            // Exhausted retries: fall through to show the in-character error.
+            console.warn('[advance] turn failed after retries:', e);
+            break;
           }
-          if (!data) continue;
-          let payload: unknown;
-          try {
-            payload = JSON.parse(data);
-          } catch {
-            continue;
-          }
-
-          if (event === 'check_resolved') {
-            // Fires BEFORE the KP starts writing — kick off the dice animation.
-            const p = payload as {
-              summary: string;
-              outcome: string;
-              kind: string;
-              roll: number;
-              target: number | null;
-            };
-            rollCounterRef.current += 1;
-            setLiveRoll({
-              summary: p.summary,
-              outcome: p.outcome as DiceOutcome,
-              kind: (p.kind === 'san' ? 'san' : 'skill_like') as LiveRoll['kind'],
-              roll: p.roll,
-              target: p.target,
-              rollNo: rollCounterRef.current,
-            });
-          } else if (event === 'narration') {
-            const p = payload as { text?: string };
-            if (typeof p.text === 'string') setStreamText(p.text);
-          } else if (event === 'complete') {
-            commit(payload as PlayerView);
-            setStreamText('');
-            setInput('');
-            finished = true;
-          } else if (event === 'error') {
-            const p = payload as { message?: string };
-            throw new Error(p.message ?? 'turn failed');
-          }
+          // Silent retry: reset visual turn state but DO NOT show an error.
+          // The narration card will keep rendering the "KP 正在稳住思绪……"
+          // placeholder while we back off and try again.
+          console.warn(`[advance] turn attempt ${attempt + 1} failed, retrying:`, e);
+          setStreamText('');
+          setLiveRoll(null);
+          await new Promise(r => setTimeout(r, BACKOFFS[attempt]!));
         }
       }
-    } catch (e) {
-      setError((e as Error).message);
+      // All attempts failed — surface a single, in-character error.
+      setError('KP 一时间失了神——请再试一次你的行动。');
       setStreamText('');
     } finally {
       setStreaming(false);
@@ -172,7 +198,7 @@ export function GameView({
       : isMidTurnWait
         ? liveRoll
           ? '（骰子落下了。KP 正在把结果织进叙事……）'
-          : '（KP 正在书写……）'
+          : '（KP 正在稳住思绪……）'
         : view.narration;
 
   // What roll should the dice card display?

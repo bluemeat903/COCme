@@ -33,7 +33,10 @@ export function createDeepSeek(cfg?: Partial<DeepSeekConfig>): {
   const baseURL = cfg?.baseURL ?? process.env['DEEPSEEK_BASE_URL'] ?? 'https://api.deepseek.com';
   const chatModel = cfg?.chatModel ?? process.env['DEEPSEEK_MODEL_CHAT'] ?? 'deepseek-chat';
   const reasonModel = cfg?.reasonModel ?? process.env['DEEPSEEK_MODEL_REASON'] ?? 'deepseek-reasoner';
-  const client = new OpenAI({ apiKey, baseURL });
+  // Conservative SDK-level fallback for true 429/5xx/connect errors.
+  // Application-level withApiRetry (see src/lib/retry.ts) layers on top to
+  // also cover mid-stream drops that the SDK cannot itself rescue.
+  const client = new OpenAI({ apiKey, baseURL, maxRetries: 2, timeout: 60_000 });
 
   const chat: ChatCompletion = async (req) => {
     const res = await client.chat.completions.create(
